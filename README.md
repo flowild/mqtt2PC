@@ -2,11 +2,17 @@
 
 A Windows tray app that connects your PC to an existing MQTT broker on your local network.
 
-Stage 3 includes configurable power controls and named program/script actions, Home Assistant discovery, volume/mute state reporting, media buttons, automatic reconnect, online/offline availability, and a test notification command. Startup registration and an installer are deferred to stage 4; launch the app manually for now.
+Stage 4 adds a per-user Windows installer, optional start at sign-in, and rolling diagnostic logs. It includes configurable power controls and named program/batch/script actions, Home Assistant discovery, volume/mute state reporting, media buttons, automatic reconnect, and online/offline availability.
 
-## Run
+## Install and run
 
-Requirements: Windows, the .NET 9 SDK to build, and an MQTT 5 broker (for example, a current Mosquitto installation). The generated executable requires the .NET 9 Desktop Runtime.
+Requirements: Windows 10/11 x64, the .NET 9 Desktop Runtime (x64), and an MQTT 5 broker. The installer and portable build are framework-dependent: they do not bundle or install the .NET runtime. Building from source also requires the .NET 9 SDK.
+
+Exit the running mqtt2PC app from its tray menu, then open `artifacts/stage4/mqtt2PC-0.4.0-x64.msi`. It installs for your Windows account under `%LOCALAPPDATA%\Programs\mqtt2PC` and adds a Start menu shortcut. Start mqtt2PC from that shortcut after installation. Installation does not enable startup, launch the app, or change existing broker settings, credentials, device IDs, or configured actions.
+
+Alternatively, extract `artifacts/stage4/mqtt2PC-0.4.0-portable.zip` and run `mqtt2PC.exe` from the extracted folder. The unpacked build is also available at `artifacts/stage4/portable/mqtt2PC.exe`. Keep its files together and use a stable folder if you enable startup. Release checksums are in `artifacts/stage4/SHA256SUMS.txt`. The locally built MSI is unsigned.
+
+For development:
 
 ```powershell
 dotnet build mqtt2PC.sln --configuration Release
@@ -21,9 +27,21 @@ Enable TLS when your broker supports it. The broker certificate must be valid fo
 
 Settings are saved in `%LOCALAPPDATA%\mqtt2PC\settings.json`. The password is stored separately in Windows Credential Manager under `mqtt2PC/<device-id>`. The password field is prefilled when settings open; clearing it and saving removes the stored password. Each saved installation has a stable generated device ID, independent of the editable PC name.
 
+## Startup, diagnostics and uninstall
+
+In **Settings → Startup and diagnostics**, select **Start mqtt2PC when I sign in to Windows**, then **Save and connect**. Uncheck it and save to disable startup. This creates/removes the current user's `mqtt2PC.lnk` in the Windows Startup folder, targeting this copy of the app with `--startup`. Windows may delay startup, and Windows Startup settings or Task Manager can independently disable an entry. No Windows service or administrator registration is used; controls run in your signed-in session.
+
+Startup launches use saved settings without opening the settings window. A duplicate startup instance exits silently. Missing or invalid settings produce a tray notice rather than blocking sign-in with a configuration dialog; open Settings from the tray to resolve them. Moving a portable build requires re-enabling startup from its new location.
+
+Select **Open log folder** from the tray menu or Startup and diagnostics tab. Logs live in `%LOCALAPPDATA%\mqtt2PC\logs\mqtt2pc.log`, with four rolling archives (`.1` through `.4`), each limited to approximately 1 MiB. Entries are JSON lines with a UTC timestamp, severity, event code, and optional safe diagnostic code, exception type, and HRESULT. They record connection/retry events, audio availability, and action outcomes. Passwords, usernames, MQTT payloads/request IDs, executable paths, program arguments, and exception messages/stack traces are not recorded. A full/unwritable log directory does not stop MQTT control.
+
+For troubleshooting, look for `mqtt.connection_failed`, `mqtt.retry_scheduled`, `action.failed`, or `command.result`. Connection failures include broker enum codes such as `BadUserNameOrPassword` and `Subscribe: NotAuthorized` when supplied by the broker. Action success confirms a request or process launch, not program completion. Unexpected app/UI exceptions are also recorded using their type and HRESULT.
+
+Uninstall through **Windows Settings → Apps → Installed apps → mqtt2PC** after exiting the tray app. Uninstall removes installed binaries, the Start menu shortcut, and mqtt2PC's startup shortcut. Broker settings, discovery history, credentials, and logs are kept so reinstalling reuses your configuration. Upgrades, including rebuilt installers with the same version, preserve the startup shortcut and the stable install path. Home Assistant's retained device configuration remains available for reuse; an uninstalled PC is shown offline.
+
 ## Home Assistant controls
 
-Exit the running app from its tray menu before launching `artifacts/stage3/mqtt2PC.exe`. Saved broker settings, credentials, device ID, and existing media/audio entities are reused. Older settings load with power controls disabled and no configured actions. All stages share the single-instance check, so the older app must exit before the new app can start.
+Saved broker settings, credentials, device ID, and existing media/audio entities are reused when upgrading. Settings from before stage 3 load with power controls disabled and no configured actions. All builds share the single-instance check, so exit an older copy before starting the installed or updated copy.
 
 With MQTT discovery enabled in Home Assistant and the default discovery prefix `homeassistant`, connecting the app creates one device named after the configured **PC name**, containing:
 
@@ -63,7 +81,7 @@ To add a program or script action:
 
 Batch (`.bat`) files can be selected directly in the Executable field. They run through Windows `cmd.exe` automatically, with the batch file's folder as the default working folder. Fixed arguments still use one line per argument. Batch arguments follow `cmd.exe` quoting rules; the launcher quotes each argument, disables AutoRun commands, and disables delayed expansion. As with all actions, a successful launch confirms the process started, rather than confirming the script completed successfully.
 
-The batch-enabled update is published separately to `artifacts/stage3-batch/mqtt2PC.exe`. Exit the running tray app before starting that build; saved settings are reused.
+Batch support is included in the stage 4 installer and portable build.
 
 Other script types use a locally configured interpreter. For example, choose `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` and enter these three arguments on separate lines:
 
@@ -168,12 +186,17 @@ dotnet test mqtt2PC.sln --configuration Release --no-build --no-restore
 
 Integration tests start temporary MQTT brokers bound only to loopback. They cover authentication, retained state, discovery and cleanup, Home Assistant birth messages, command validation, disabled controls, repeat requests, fixed action arguments, settings migration, audio feedback, media routing, audio-device loss/recovery, and reconnects. A TCP relay drops the network without an MQTT disconnect to check the offline Last Will. Power transitions, media keys, and volume changes use fake backends, so tests cannot lock/suspend/shut down/restart your PC or change playback.
 
-Windows tests read the audio endpoint, check native input and shutdown-process specifications without executing power actions, create/remove their own test credential, and launch a hidden `cmd.exe /d /c exit 0` process to verify the native launcher. UI checks render invisible settings/editor windows and save previews under `artifacts/ui/`. These tests need an interactive Windows user session for Credential Manager.
+Windows tests read the audio endpoint, check native input and shutdown-process specifications without executing power actions, create/remove their own test credential, and run harmless test programs/batch files. Startup shortcut tests use an isolated test directory, not the real Startup folder. UI checks render invisible windows and save previews under `artifacts/ui/`. These tests need an interactive Windows user session for Credential Manager. Diagnostic tests cover broker authentication failures, reconnect logging, redaction of command content, log rotation, and unavailable log storage.
 
-To create a portable, framework-dependent build folder:
+To create the MSI and portable ZIP, restore the WiX SDK from NuGet and build with:
 
 ```powershell
-dotnet publish src/Mqtt2Pc --configuration Release --no-restore --output artifacts/stage3
+.\scripts\Build-Release.ps1
+.\scripts\Test-Release.ps1
 ```
 
-Keep the whole output folder together. No broker address or password is included in the build.
+WiX Toolset 5.0.2 is pinned in `installer/mqtt2PC.Installer.wixproj`; no global WiX installation is required. The installer is built separately from the app/test solution. `Build-Release.ps1 -NoRestore` reuses restored packages. Release builds run Windows Installer ICE validation, which requires access to the Windows Installer service. `Test-Release.ps1` opens the MSI database read-only and checks scope, payload, shortcuts, uninstall/upgrade rules, portable contents, and SHA256 hashes without installing or changing startup settings.
+
+Two ICE checks are explicitly suppressed: [ICE91](https://learn.microsoft.com/en-us/windows/win32/msi/ice91), because the package installs strictly per user under LocalAppData, and [ICE61](https://learn.microsoft.com/en-us/windows/win32/msi/ice61), because same-version development builds intentionally replace the existing installation. The remaining ICE checks stay enabled.
+
+Outputs are under `artifacts/stage4/`. Automated tests and package validation do not perform a live install/uninstall against the current Windows profile. Keep the portable folder together. No broker address, password, or user configuration is included in the build; the bundled MQTTnet license is in `THIRD-PARTY-NOTICES.txt`.

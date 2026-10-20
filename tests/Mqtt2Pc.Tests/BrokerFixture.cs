@@ -106,13 +106,13 @@ internal sealed class RunningAgent : IAsyncDisposable
     public System.Collections.Concurrent.ConcurrentQueue<ConnectionStatus> Statuses { get; } = new();
 
     public RunningAgent(AppSettings settings, string password = "", Func<string, CancellationToken, Task>? action = null,
-        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null)
+        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null, IDiagnosticLog? log = null)
     {
         var agent = new MqttAgent(settings, password, action ?? ((message, _) =>
         {
             Notifications.Writer.TryWrite(message);
             return Task.CompletedTask;
-        }), desktop, pcActions, discoveryStore);
+        }), desktop, pcActions, discoveryStore, log);
         agent.StatusChanged += status => Statuses.Enqueue(status);
         _task = agent.RunAsync(_stop.Token);
     }

@@ -9,8 +9,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ContextMenuStrip _menu = new();
     private readonly ToolStripMenuItem _statusItem = new("Disconnected") { Enabled = false };
     private readonly ToolStripMenuItem _reconnectItem = new("Reconnect");
-    private readonly SettingsStore _store = new(Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mqtt2PC", "settings.json"));
+    private readonly SettingsStore _store = new(Path.Combine(AppPaths.DataDirectory, "settings.json"));
+    private readonly FileDiagnosticLog _log;
     private readonly SemaphoreSlim _transition = new(1, 1);
     private AppSettings _settings = new();
     private ConnectionStatus _status = new(false, "Enter your MQTT broker details to connect.");
@@ -20,13 +20,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private Task? _agentTask;
     private bool _exiting;
 
-    public TrayApplicationContext()
+    public TrayApplicationContext(FileDiagnosticLog log, bool startup = false)
     {
+        _log = log;
         _ = _dispatcher.Handle;
         _menu.Items.Add(_statusItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Settings…", null, (_, _) => ShowSettings());
         _menu.Items.Add(_reconnectItem);
+        _menu.Items.Add("Open log folder", null, (_, _) => OpenLogFolder());
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("Exit", null, async (_, _) => await ShutdownAsync());
         _reconnectItem.Click += async (_, _) =>
@@ -47,7 +49,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             try
             {
                 var saved = _store.Load();
-                if (saved is null) ShowSettings();
+                if (saved is null)
+                {
+                    if (!startup) ShowSettings();
+                    else ShowStartupNotice();
+                }
                 else
                 {
                     _settings = saved;
@@ -56,8 +62,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             catch (Exception exception)
             {
-                ShowError("Could not load settings or credentials. Existing settings have been kept", exception);
-                ShowSettings();
+                if (startup)
+                {
+                    _log.Write(LogSeverity.Error, "settings.load_failed", exception: exception);
+                    ShowStartupNotice();
+                }
+                else
+                {
+                    ShowError("Could not load settings or credentials. Existing settings have been kept", exception);
+                    ShowSettings();
+                }
             }
         });
     }
@@ -77,9 +91,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             CredentialStore.Write(settings.DeviceId, settings.Username, secret);
             _store.Save(settings);
+            _log.Write(LogSeverity.Information, "settings.saved");
             _settings = settings;
             await RestartAsync(settings, secret);
-        });
+        }, new StartupRegistration(AppPaths.ExecutablePath, log: _log), OpenLogFolder);
         _form.SetStatus(_status);
         _form.SetAudioState(_audioState);
         _form.FormClosed += (_, _) => _form = null;
@@ -98,7 +113,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             var discoveryPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "mqtt2PC", $"discovery-{settings.DeviceId}.json");
             var agent = new MqttAgent(settings, password, ShowNotificationAsync,
-                new WindowsDesktopControls(_dispatcher), new WindowsPcActions(), new DiscoveryStore(discoveryPath));
+                new WindowsDesktopControls(_dispatcher), new WindowsPcActions(), new DiscoveryStore(discoveryPath), _log);
             agent.StatusChanged += status => Post(() => UpdateStatus(status));
             agent.AudioStateChanged += state => Post(() =>
             {
@@ -176,8 +191,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         catch (InvalidOperationException) when (_exiting || _dispatcher.IsDisposed) { }
     }
 
-    private static void ShowError(string title, Exception exception) =>
+    private void ShowStartupNotice()
+    {
+        UpdateStatus(new ConnectionStatus(false, "Open Settings to configure the MQTT connection."));
+        _tray.ShowBalloonTip(5000, "mqtt2PC", "Open Settings from the tray icon to configure the connection. Existing settings have been kept.", ToolTipIcon.Info);
+    }
+
+    private void OpenLogFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.LogDirectory);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
+        }
+        catch (Exception exception) { ShowError("Could not open the log folder", exception); }
+    }
+
+    private void ShowError(string title, Exception exception)
+    {
+        _log.Write(LogSeverity.Error, "app.operation_failed", exception: exception);
         MessageBox.Show($"{title}.\n\nError: {exception.GetType().Name}", "mqtt2PC", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 
     protected override void Dispose(bool disposing)
     {

@@ -6,6 +6,9 @@ internal sealed class SettingsForm : Form
 {
     private readonly AppSettings _original;
     private readonly Func<AppSettings, string, Task> _saveAndConnect;
+    private readonly IStartupRegistration? _startup;
+    private bool _startupEnabled;
+    private readonly CheckBox _startAtSignIn = new() { Text = "Start mqtt2PC when I sign in to Windows", AutoSize = true };
     private readonly TextBox _host = new() { MaxLength = 253 };
     private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535 };
     private readonly CheckBox _tls = new() { Text = "Use TLS (validate broker certificate)", AutoSize = true };
@@ -24,10 +27,12 @@ internal sealed class SettingsForm : Form
     };
     private bool _saving;
 
-    public SettingsForm(AppSettings settings, string password, Func<AppSettings, string, Task> saveAndConnect)
+    public SettingsForm(AppSettings settings, string password, Func<AppSettings, string, Task> saveAndConnect,
+        IStartupRegistration? startup = null, Action? openLogs = null)
     {
         _original = settings;
         _saveAndConnect = saveAndConnect;
+        _startup = startup;
         Text = "mqtt2PC — Settings";
         Icon = SystemIcons.Application;
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -49,6 +54,7 @@ internal sealed class SettingsForm : Form
         connection.Controls.Add(scroll);
         tabs.TabPages.Add(connection);
         tabs.TabPages.Add(CreateActionsPage(settings));
+        tabs.TabPages.Add(CreateStartupPage(openLogs));
         Controls.Add(tabs);
 
         AddWide(layout, new Label { Text = "Connect this PC to your MQTT broker", AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
@@ -149,17 +155,54 @@ internal sealed class SettingsForm : Form
             };
             settings.Validate();
             await _saveAndConnect(settings, _password.Text);
+            if (_startup is not null && _startAtSignIn.Enabled && _startAtSignIn.Checked != _startupEnabled)
+            {
+                _startup.SetEnabled(_startAtSignIn.Checked);
+                _startupEnabled = _startAtSignIn.Checked;
+            }
         }
         catch (ArgumentException exception) { _error.Text = exception.Message; }
         catch (Exception exception)
         {
-            _error.Text = $"Could not save or connect ({exception.GetType().Name}). Check access to settings and Windows Credential Manager.";
+            _error.Text = $"Could not save, connect or update startup ({exception.GetType().Name}). Check settings, startup folder and Windows Credential Manager access.";
         }
         finally
         {
             _saving = false;
             _save.Enabled = true;
         }
+    }
+
+    private TabPage CreateStartupPage(Action? openLogs)
+    {
+        var page = new TabPage("Startup and diagnostics") { Padding = new Padding(20) };
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        page.Controls.Add(layout);
+        _startAtSignIn.Enabled = _startup is not null;
+        try { _startupEnabled = _startup?.IsEnabled ?? false; }
+        catch (Exception exception)
+        {
+            _startAtSignIn.Enabled = false;
+            _error.Text = $"Could not read startup registration ({exception.GetType().Name}).";
+        }
+        _startAtSignIn.Checked = _startupEnabled;
+        layout.Controls.Add(_startAtSignIn);
+        layout.Controls.Add(new Label
+        {
+            Text = "Changes apply with Save and connect. Install the app before enabling startup so it keeps a stable location. Startup runs after sign-in, in your Windows session.",
+            AutoSize = true, MaximumSize = new Size(640, 0), Margin = new Padding(0, 12, 0, 20)
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Diagnostic logs record connections, errors and action outcomes. Passwords, command payloads and program arguments are excluded.",
+            AutoSize = true, MaximumSize = new Size(640, 0)
+        });
+        layout.Controls.Add(new Label { Text = AppPaths.LogDirectory, AutoSize = true, MaximumSize = new Size(640, 0), Margin = new Padding(0, 12, 0, 12) });
+        var logs = new Button { Text = "Open log folder", AutoSize = true, Enabled = openLogs is not null };
+        logs.Click += (_, _) => openLogs?.Invoke();
+        layout.Controls.Add(logs);
+        layout.Controls.Add(new Label { Text = "mqtt2PC 0.4.0", AutoSize = true, Margin = new Padding(0, 20, 0, 0) });
+        return page;
     }
 
     private TabPage CreateActionsPage(AppSettings settings)

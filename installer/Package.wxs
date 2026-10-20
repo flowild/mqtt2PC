@@ -1,0 +1,47 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="mqtt2PC" Manufacturer="mqtt2PC" Version="0.4.0" Language="1033"
+           UpgradeCode="39B17F25-B91C-4FC4-9714-F44009C66018" Scope="perUser">
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of mqtt2PC is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPCOMMENTS" Value="Local MQTT control for your Windows PC. Requires the .NET 9 Desktop Runtime (x64)." />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="AppPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="mqtt2PC">
+          <Component Id="ApplicationFiles" Guid="6ED3DB23-8DBE-49D8-97A7-15A8106D15C0">
+            <File Id="AppExe" Source="$(var.PublishDirectory)\mqtt2PC.exe" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\mqtt2PC.dll" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\mqtt2PC.deps.json" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\mqtt2PC.runtimeconfig.json" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\Mqtt2Pc.Core.dll" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\MQTTnet.dll" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\README.md" KeyPath="no" />
+            <File Source="$(var.PublishDirectory)\THIRD-PARTY-NOTICES.txt" KeyPath="no" />
+            <RegistryValue Root="HKCU" Key="Software\mqtt2PC\Installer" Name="ApplicationFiles" Type="integer" Value="1" KeyPath="yes" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemoveEmptyAppPrograms" Directory="AppPrograms" On="uninstall" />
+            <RemoveFile Id="RemoveStartupShortcut" Name="mqtt2PC.lnk" Property="STARTUP_CLEANUP_DIR" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="StartupFolder" />
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="mqtt2PC">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="AppShortcut" Name="mqtt2PC" Target="[INSTALLFOLDER]mqtt2PC.exe" WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\mqtt2PC\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <!-- Preserve opt-in startup across a major upgrade. Normal uninstall removes
+         only this app's shortcut; settings, credentials and logs stay untouched. -->
+    <SetProperty Id="STARTUP_CLEANUP_DIR" Value="[StartupFolder]" Before="RemoveFiles" Sequence="execute"
+                 Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <Feature Id="Application" Title="mqtt2PC" Level="1">
+      <ComponentRef Id="ApplicationFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

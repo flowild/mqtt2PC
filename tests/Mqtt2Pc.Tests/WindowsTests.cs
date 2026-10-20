@@ -121,7 +121,7 @@ public sealed class WindowsTests(ITestOutputHelper output)
                 {
                     BrokerHost = "mqtt.home.lan", Username = "desktop-pc", DeviceId = "desktop-demo",
                     ComputerName = "Desktop PC"
-                }, "", (_, _) => throw new InvalidOperationException("A render must not save settings."));
+                }, "", (_, _) => throw new InvalidOperationException("A render must not save settings."), new MemoryStartup());
                 form.SetStatus(new ConnectionStatus(false, "Disconnected — enter your broker details and click Save and connect."));
                 form.SetAudioState(new AudioState(35, false));
                 // A form must be visible to WinForms for its child controls to render.
@@ -147,6 +147,34 @@ public sealed class WindowsTests(ITestOutputHelper output)
                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
                 bitmap.Save(Path.Combine(artifactDirectory, "power-actions-preview.png"));
                 Assert.Equal(4, FindControls(tabs.TabPages[1]).OfType<CheckBox>().Count());
+                tabs.SelectedIndex = 2;
+                form.PerformLayout();
+                form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                bitmap.Save(Path.Combine(artifactDirectory, "startup-diagnostics-preview.png"));
+                var startupRegistration = new MemoryStartup();
+                var saves = 0;
+                using (var startupForm = new SettingsForm(new AppSettings { BrokerHost = "localhost" }, "", (_, _) =>
+                {
+                    saves++;
+                    return Task.CompletedTask;
+                }, startupRegistration) { Opacity = 0, ShowInTaskbar = false })
+                {
+                    startupForm.Show();
+                    FindControls(startupForm).OfType<TabControl>().Single().SelectedIndex = 2;
+                    var startupToggle = FindControls(startupForm).OfType<CheckBox>().Single(toggle => toggle.Text.Contains("sign in", StringComparison.Ordinal));
+                    var startupSave = FindControls(startupForm).OfType<Button>().Single(button => button.Text == "Save and connect");
+                    Assert.False(startupToggle.Checked);
+                    startupToggle.Checked = true;
+                    startupSave.PerformClick();
+                    Assert.True(startupRegistration.IsEnabled);
+                    startupSave.PerformClick();
+                    Assert.Equal(1, startupRegistration.Writes);
+                    startupToggle.Checked = false;
+                    startupSave.PerformClick();
+                    Assert.False(startupRegistration.IsEnabled);
+                    Assert.Equal(2, startupRegistration.Writes);
+                    Assert.Equal(3, saves);
+                }
 
                 using var editor = new ActionEditorForm(StageThreeTests.ExampleAction(), _ => true)
                 {
@@ -181,5 +209,12 @@ public sealed class WindowsTests(ITestOutputHelper output)
             yield return child;
             foreach (var descendant in FindControls(child)) yield return descendant;
         }
+    }
+
+    private sealed class MemoryStartup : IStartupRegistration
+    {
+        public bool IsEnabled { get; private set; }
+        public int Writes { get; private set; }
+        public void SetEnabled(bool enabled) { IsEnabled = enabled; Writes++; }
     }
 }

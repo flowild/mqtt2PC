@@ -1,0 +1,12 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <OutputName>mqtt2PC-0.4.0-x64</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <!-- ICE91 is expected for this strictly per-user LocalAppData installation.
+         ICE61 flags our intentional support for upgrading same-version development builds. -->
+    <SuppressIces>ICE61;ICE91</SuppressIces>
+    <PublishDirectory Condition="'$(PublishDirectory)' == ''">$(MSBuildThisFileDirectory)..\artifacts\stage4\portable</PublishDirectory>
+    <DefineConstants>PublishDirectory=$(PublishDirectory)</DefineConstants>
+  </PropertyGroup>
+</Project>

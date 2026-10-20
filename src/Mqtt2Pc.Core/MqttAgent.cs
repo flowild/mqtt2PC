@@ -19,6 +19,7 @@ public sealed class MqttAgent
     private readonly IDesktopControls? _desktop;
     private readonly IPcActions? _pcActions;
     private readonly DiscoveryStore? _discoveryStore;
+    private readonly IDiagnosticLog _log;
     private readonly HashSet<string> _advertisedTopics = [];
     private readonly HashSet<string> _recentIds = [];
     private readonly Queue<string> _idOrder = new();
@@ -28,7 +29,8 @@ public sealed class MqttAgent
     public event Action<AudioState?>? AudioStateChanged;
 
     public MqttAgent(AppSettings settings, string password, Func<string, CancellationToken, Task> showNotification,
-        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null)
+        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null,
+        IDiagnosticLog? log = null)
     {
         settings.Validate();
         _settings = settings with { Actions = settings.Actions.Select(action => action with { Arguments = action.Arguments.ToArray() }).ToArray() };
@@ -37,6 +39,7 @@ public sealed class MqttAgent
         _desktop = desktop;
         _pcActions = pcActions;
         _discoveryStore = discoveryStore;
+        _log = log ?? NullDiagnosticLog.Instance;
     }
 
     // One owner controls the entire connection lifetime, including reconnect and shutdown.
@@ -53,6 +56,7 @@ public sealed class MqttAgent
                 using var session = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                 using var client = new MqttClientFactory().CreateMqttClient();
                 Task? refreshTask = null;
+                string? connectionRefusal = null;
                 var audioPublication = new AudioPublication();
                 var commandTopics = new HashSet<string> { _settings.TestCommandTopic };
                 if (_desktop is not null)
@@ -64,26 +68,39 @@ public sealed class MqttAgent
                 {
                     SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait
                 });
-                client.DisconnectedAsync += _ =>
+                client.DisconnectedAsync += args =>
                 {
+                    if (args.ConnectResult is { } failed && (int)failed.ResultCode != 0)
+                        connectionRefusal = failed.ResultCode.ToString();
                     session.Cancel();
                     return Task.CompletedTask;
                 };
                 client.ApplicationMessageReceivedAsync += args =>
                 {
                     var message = args.ApplicationMessage;
+                    if (message.Payload.Length > TestCommand.MaximumPayloadBytes)
+                    {
+                        _log.Write(LogSeverity.Warning, "mqtt.payload_rejected", "oversized");
+                        return Task.CompletedTask;
+                    }
                     if ((commandTopics.Contains(message.Topic) || (_pcActions is not null && IsPcCommand(message.Topic)) ||
                         (_desktop is not null && message.Topic == HomeAssistantDiscovery.BirthTopic)) &&
                         message.Payload.Length <= TestCommand.MaximumPayloadBytes &&
                         !incoming.Writer.TryWrite(new ReceivedCommand(message.Topic, message.Retain, message.Dup, message.Payload.ToArray())))
+                    {
+                        _log.Write(LogSeverity.Warning, "mqtt.queue_full");
                         Report(true, "Command queue full; a command was ignored.");
+                    }
                     return Task.CompletedTask;
                 };
 
                 try
                 {
                     Report(false, failures == 0 ? "Connecting…" : "Reconnecting…");
-                    await client.ConnectAsync(BuildOptions(), session.Token).ConfigureAwait(false);
+                    _log.Write(LogSeverity.Information, "mqtt.connecting");
+                    var connected = await client.ConnectAsync(BuildOptions(), session.Token).ConfigureAwait(false);
+                    if ((int)connected.ResultCode != 0)
+                        throw new BrokerRequestException("Connect", connected.ResultCode.ToString());
                     var subscribe = new MqttClientSubscribeOptionsBuilder();
                     foreach (var topic in commandTopics)
                         subscribe.WithTopicFilter(filter => filter.WithTopic(topic)
@@ -99,8 +116,9 @@ public sealed class MqttAgent
                         subscribe.WithTopicFilter(filter => filter.WithTopic(HomeAssistantDiscovery.BirthTopic)
                             .WithRetainHandling(MqttRetainHandling.DoNotSendOnSubscribe));
                     var subscription = await client.SubscribeAsync(subscribe.Build(), session.Token).ConfigureAwait(false);
-                    if (subscription.Items.Any(item => (int)item.ResultCode >= 128))
-                        throw new InvalidOperationException("The broker refused the command subscription.");
+                    var denied = subscription.Items.FirstOrDefault(item => (int)item.ResultCode >= 128);
+                    if (denied is not null)
+                        throw new BrokerRequestException("Subscribe", denied.ResultCode.ToString());
 
                     if (_desktop is not null)
                     {
@@ -110,18 +128,31 @@ public sealed class MqttAgent
                     }
                     await PublishAsync(client, _settings.AvailabilityTopic, "online", true, session.Token).ConfigureAwait(false);
                     Report(true, $"Connected to {_settings.BrokerHost}:{_settings.BrokerPort}");
+                    _log.Write(LogSeverity.Information, "mqtt.connected");
                     failures = 0;
                     await ProcessCommandsAsync(client, incoming.Reader, audioPublication, session.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (session.IsCancellationRequested)
                 {
                     if (!stoppingToken.IsCancellationRequested)
-                        Report(false, "Connection lost; retrying…");
+                    {
+                        if (connectionRefusal is not null)
+                        {
+                            _log.Write(LogSeverity.Error, "mqtt.connection_failed", connectionRefusal);
+                            Report(false, $"Connection failed ({connectionRefusal}). Check broker credentials and permissions.");
+                        }
+                        else
+                        {
+                            _log.Write(LogSeverity.Warning, "mqtt.disconnected");
+                            Report(false, "Connection lost; retrying…");
+                        }
+                    }
                 }
                 catch (Exception exception)
                 {
-                    // Exception messages may contain connection details. Do not expose credentials.
-                    Report(false, $"Connection failed ({exception.GetType().Name}). Check broker, credentials and topic permissions.");
+                    var reason = connectionRefusal ?? SafeFailureReason(exception);
+                    _log.Write(LogSeverity.Error, "mqtt.connection_failed", reason, exception);
+                    Report(false, $"Connection failed ({reason}). Check broker, credentials and topic permissions.");
                 }
                 finally
                 {
@@ -140,8 +171,9 @@ public sealed class MqttAgent
                             await PublishAsync(client, _settings.AvailabilityTopic, "offline", true, cleanup.Token).ConfigureAwait(false);
                             await client.DisconnectAsync(new MqttClientDisconnectOptionsBuilder().Build(), cleanup.Token).ConfigureAwait(false);
                         }
-                        catch (Exception)
+                        catch (Exception exception)
                         {
+                            _log.Write(LogSeverity.Warning, "mqtt.cleanup_failed", exception: exception);
                             // Disposing the socket lets the broker publish the offline Last Will.
                         }
                     }
@@ -150,13 +182,18 @@ public sealed class MqttAgent
                 if (!stoppingToken.IsCancellationRequested)
                 {
                     var delay = Math.Min(30, Math.Pow(2, Math.Min(failures++, 5)));
+                    _log.Write(LogSeverity.Information, "mqtt.retry_scheduled", $"seconds={delay.ToString(CultureInfo.InvariantCulture)}");
                     await Task.Delay(TimeSpan.FromSeconds(delay) + TimeSpan.FromMilliseconds(Random.Shared.Next(250)), stoppingToken)
                         .ConfigureAwait(false);
                 }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        finally { Report(false, "Disconnected"); }
+        finally
+        {
+            _log.Write(LogSeverity.Information, "mqtt.stopped");
+            Report(false, "Disconnected");
+        }
     }
 
     private MqttClientOptions BuildOptions()
@@ -244,8 +281,9 @@ public sealed class MqttAgent
                 Report(true, $"Last test received at {DateTimeOffset.Now:T}");
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception)
+            catch (Exception exception)
             {
+                _log.Write(LogSeverity.Error, "notification.failed", exception: exception);
                 status = "error";
                 detail = "The PC could not show the notification.";
             }
@@ -308,8 +346,9 @@ public sealed class MqttAgent
             else processId = await _pcActions!.LaunchAsync(configured!, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception)
+        catch (Exception exception)
         {
+            _log.Write(LogSeverity.Error, "action.failed", power.HasValue ? "power" : "configured_action", exception);
             await PublishResultAsync(client, command.Id, "error", "Windows could not perform this action. Check the executable, working directory and Windows permissions.", token, message.Topic)
                 .ConfigureAwait(false);
             return;
@@ -354,8 +393,9 @@ public sealed class MqttAgent
         }
         try { await action().ConfigureAwait(false); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception)
+        catch (Exception exception)
         {
+            _log.Write(LogSeverity.Error, "desktop.failed", media ? "media" : "audio", exception);
             await PublishResultAsync(client, null, "error", "Windows could not perform the audio or media action.", token, command.Topic).ConfigureAwait(false);
             if (!media) await PublishAudioAsync(client, audio, true, token).ConfigureAwait(false);
             return;
@@ -385,7 +425,11 @@ public sealed class MqttAgent
         AudioState? state;
         try { state = await _desktop!.GetAudioStateAsync(token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception) { state = null; }
+        catch (Exception exception)
+        {
+            if (published.Available != false) _log.Write(LogSeverity.Warning, "audio.unavailable", exception: exception);
+            state = null;
+        }
 
         if (state is null)
         {
@@ -404,6 +448,7 @@ public sealed class MqttAgent
         }
         if (force || published.Available != true)
             await PublishAsync(client, _settings.AudioAvailabilityTopic, "online", true, token).ConfigureAwait(false);
+        if (published.Available != true) _log.Write(LogSeverity.Information, "audio.available");
         published.Available = true;
         published.LastState = state;
     }
@@ -416,10 +461,17 @@ public sealed class MqttAgent
     }
 
     private Task PublishResultAsync(IMqttClient client, string? id, string status, string message, CancellationToken token,
-        string? commandTopic = null, int? processId = null) =>
-        PublishAsync(client, _settings.ResultTopic,
+        string? commandTopic = null, int? processId = null)
+    {
+        var topic = commandTopic ?? _settings.TestCommandTopic;
+        var category = topic.StartsWith(_settings.PowerCommandTopic(""), StringComparison.Ordinal) ? "power" :
+            topic.StartsWith(_settings.ActionCommandTopic(""), StringComparison.Ordinal) ? "configured_action" :
+            topic == _settings.TestCommandTopic ? "notification" : "audio_media";
+        _log.Write(status is "error" or "rejected" ? LogSeverity.Warning : LogSeverity.Information, "command.result", $"{category}:{status}");
+        return PublishAsync(client, _settings.ResultTopic,
             JsonSerializer.Serialize(new { id, status, message, timestamp = DateTimeOffset.UtcNow,
-                command_topic = commandTopic ?? _settings.TestCommandTopic, process_id = processId }), false, token);
+                command_topic = topic, process_id = processId }), false, token);
+    }
 
     private static async Task PublishAsync(IMqttClient client, string topic, string payload, bool retain, CancellationToken token)
     {
@@ -427,7 +479,19 @@ public sealed class MqttAgent
             .WithTopic(topic).WithPayload(payload).WithRetainFlag(retain)
             .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build(), token).ConfigureAwait(false);
         if ((int)result.ReasonCode >= 128)
-            throw new InvalidOperationException("The broker refused a publication.");
+            throw new BrokerRequestException("Publish", result.ReasonCode.ToString());
+    }
+
+    private static string SafeFailureReason(Exception exception) => exception switch
+    {
+        BrokerRequestException request => $"{request.Operation}: {request.Reason}",
+        _ => exception.GetType().Name
+    };
+
+    private sealed class BrokerRequestException(string operation, string reason) : Exception("The broker rejected the request.")
+    {
+        public string Operation { get; } = operation;
+        public string Reason { get; } = reason;
     }
 
     private void Report(bool connected, string message) => StatusChanged?.Invoke(new(connected, message));

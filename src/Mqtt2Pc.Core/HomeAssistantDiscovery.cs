@@ -31,9 +31,9 @@ public static class HomeAssistantDiscovery
                 ["device"] = new
                 {
                     identifiers = new[] { $"mqtt2pc_{settings.DeviceId}" }, name = settings.ComputerName,
-                    manufacturer = "mqtt2PC", model = "Windows PC", sw_version = "0.3.0"
+                    manufacturer = "mqtt2PC", model = "Windows PC", sw_version = "0.4.0"
                 },
-                ["origin"] = new { name = "mqtt2PC", sw_version = "0.3.0" },
+                ["origin"] = new { name = "mqtt2PC", sw_version = "0.4.0" },
                 ["retain"] = false
             };
         }
