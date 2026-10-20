@@ -7,6 +7,15 @@ public sealed record DiscoveryMessage(string Topic, string Payload);
 public static class HomeAssistantDiscovery
 {
     public const string BirthTopic = "homeassistant/status";
+    public const string ActionCommandTemplate = "{\"id\":\"{{ now().strftime('%Y%m%d%H%M%S%f') }}\"}";
+
+    public static bool IsDeviceTopic(AppSettings settings, string topic)
+    {
+        var parts = topic.Split('/');
+        return parts.Length == 5 && parts[0] == "homeassistant" && parts[1] is "number" or "switch" or "button" &&
+            parts[2] == $"mqtt2pc_{settings.DeviceId}" && parts[3].Length is > 0 and <= 64 &&
+            parts[3].All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_') && parts[4] == "config";
+    }
 
     public static IReadOnlyList<DiscoveryMessage> Create(AppSettings settings)
     {
@@ -22,9 +31,9 @@ public static class HomeAssistantDiscovery
                 ["device"] = new
                 {
                     identifiers = new[] { $"mqtt2pc_{settings.DeviceId}" }, name = settings.ComputerName,
-                    manufacturer = "mqtt2PC", model = "Windows PC", sw_version = "0.2.0"
+                    manufacturer = "mqtt2PC", model = "Windows PC", sw_version = "0.3.0"
                 },
-                ["origin"] = new { name = "mqtt2PC", sw_version = "0.2.0" },
+                ["origin"] = new { name = "mqtt2PC", sw_version = "0.3.0" },
                 ["retain"] = false
             };
         }
@@ -68,6 +77,28 @@ public static class HomeAssistantDiscovery
             button["qos"] = 0;
             Add("button", key, button);
         }
+        void AddActionButton(string key, string name, string topic, string icon)
+        {
+            var button = Common(key, name, icon, false);
+            button["command_topic"] = topic;
+            button["payload_press"] = "PRESS";
+            button["command_template"] = ActionCommandTemplate;
+            button["qos"] = 1;
+            Add("button", key, button);
+        }
+        foreach (var power in Enum.GetValues<PowerAction>())
+        {
+            if (!settings.Power.IsEnabled(power)) continue;
+            var key = power.ToString().ToLowerInvariant();
+            var icon = power switch
+            {
+                PowerAction.Lock => "mdi:lock", PowerAction.Sleep => "mdi:sleep",
+                PowerAction.Shutdown => "mdi:power", _ => "mdi:restart"
+            };
+            AddActionButton($"power_{key}", power.ToString(), settings.PowerCommandTopic(key), icon);
+        }
+        foreach (var action in settings.Actions.Where(action => action.Enabled))
+            AddActionButton($"action_{action.Id}", action.Name, settings.ActionCommandTopic(action.Id), "mdi:application-cog");
         return messages;
     }
 }

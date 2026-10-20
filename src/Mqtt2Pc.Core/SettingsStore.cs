@@ -20,7 +20,8 @@ public sealed class SettingsStore(string path)
         {
             BrokerHost = settings.BrokerHost!, BrokerPort = settings.BrokerPort,
             UseTls = settings.UseTls, Username = settings.Username!,
-            ComputerName = settings.ComputerName!, DeviceId = settings.DeviceId!
+            ComputerName = settings.ComputerName!, DeviceId = settings.DeviceId!,
+            Power = settings.Power!, Actions = settings.Actions!
         };
         result.Validate();
         return result;
@@ -37,7 +38,8 @@ public sealed class SettingsStore(string path)
             {
                 BrokerHost = settings.BrokerHost, BrokerPort = settings.BrokerPort,
                 UseTls = settings.UseTls, Username = settings.Username,
-                ComputerName = settings.ComputerName, DeviceId = settings.DeviceId
+                ComputerName = settings.ComputerName, DeviceId = settings.DeviceId,
+                Power = settings.Power, Actions = settings.Actions
             }, JsonOptions));
             File.Move(temporaryPath, path, overwrite: true);
         }
@@ -55,5 +57,7 @@ public sealed class SettingsStore(string path)
         public string? Username { get; init; }
         public string? ComputerName { get; init; }
         public string? DeviceId { get; init; }
+        public PowerControls? Power { get; init; } = new();
+        public ConfiguredAction[]? Actions { get; init; } = [];
     }
 }

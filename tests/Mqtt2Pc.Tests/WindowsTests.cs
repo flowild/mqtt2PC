@@ -8,6 +8,45 @@ namespace Mqtt2Pc.Tests;
 public sealed class WindowsTests(ITestOutputHelper output)
 {
     [Theory]
+    [InlineData(PowerAction.Shutdown, "/s")]
+    [InlineData(PowerAction.Restart, "/r")]
+    public void PowerProcessSpecificationsNeverForceCloseApplications(PowerAction action, string flag)
+    {
+        var info = WindowsPcActions.CreateShutdownStartInfo(action);
+        Assert.Equal(Path.Combine(Environment.SystemDirectory, "shutdown.exe"), info.FileName);
+        Assert.Equal(new[] { flag, "/t", "0" }, info.ArgumentList);
+        Assert.False(info.UseShellExecute);
+        Assert.True(info.CreateNoWindow);
+    }
+
+    [Fact]
+    public void ConfiguredLaunchPreservesEachArgumentWithoutShellParsing()
+    {
+        var arguments = new[] { "C:\\Folder with spaces\\note.txt", "literal \"quotes\"", "& not-a-shell-command", "" };
+        var info = WindowsPcActions.CreateActionStartInfo(StageThreeTests.ExampleAction() with { Arguments = arguments });
+        Assert.False(info.UseShellExecute);
+        Assert.True(info.CreateNoWindow);
+        Assert.Equal(arguments, info.ArgumentList);
+        Assert.Equal(Environment.SystemDirectory, info.WorkingDirectory);
+    }
+
+    [Fact]
+    public async Task NativeLauncherCanStartAHarmlessProcessAndReportsMissingFiles()
+    {
+        var action = StageThreeTests.ExampleAction() with
+        {
+            Executable = Path.Combine(Environment.SystemDirectory, "cmd.exe"), Arguments = ["/d", "/c", "exit", "0"]
+        };
+        var executor = new WindowsPcActions();
+        var pid = await executor.LaunchAsync(action, CancellationToken.None);
+        Assert.True(pid > 0);
+        await Assert.ThrowsAsync<FileNotFoundException>(() => executor.LaunchAsync(action with
+        {
+            Executable = Path.Combine(Path.GetTempPath(), $"nonexistent-{Guid.NewGuid():N}.exe")
+        }, CancellationToken.None));
+    }
+
+    [Theory]
     [InlineData(MediaAction.PlayPause, 0xB3)]
     [InlineData(MediaAction.Next, 0xB0)]
     [InlineData(MediaAction.Previous, 0xB1)]
@@ -102,6 +141,28 @@ public sealed class WindowsTests(ITestOutputHelper output)
                 var artifactDirectory = Path.Combine(projectDirectory, "artifacts", "ui");
                 Directory.CreateDirectory(artifactDirectory);
                 bitmap.Save(Path.Combine(artifactDirectory, "settings-preview.png"));
+                var tabs = FindControls(form).OfType<TabControl>().Single();
+                tabs.SelectedIndex = 1;
+                form.PerformLayout();
+                form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                bitmap.Save(Path.Combine(artifactDirectory, "power-actions-preview.png"));
+                Assert.Equal(4, FindControls(tabs.TabPages[1]).OfType<CheckBox>().Count());
+
+                using var editor = new ActionEditorForm(StageThreeTests.ExampleAction(), _ => true)
+                {
+                    Opacity = 0, ShowInTaskbar = false
+                };
+                editor.Show();
+                editor.PerformLayout();
+                using var editorBitmap = new Bitmap(editor.Width, editor.Height);
+                editor.DrawToBitmap(editorBitmap, new Rectangle(Point.Empty, editorBitmap.Size));
+                editorBitmap.Save(Path.Combine(artifactDirectory, "action-editor-preview.png"));
+                var saveAction = FindControls(editor).OfType<Button>().Single(button => button.Text == "Save action");
+                var editorSave = editor.PointToClient(saveAction.PointToScreen(Point.Empty));
+                Assert.True(editorSave.Y + saveAction.Height <= editor.ClientSize.Height);
+                saveAction.PerformClick();
+                Assert.Equal(DialogResult.OK, editor.DialogResult);
+                Assert.Equivalent(StageThreeTests.ExampleAction(), editor.Action, strict: true);
                 Assert.True(form.Controls.Count > 0);
                 completion.SetResult();
             }

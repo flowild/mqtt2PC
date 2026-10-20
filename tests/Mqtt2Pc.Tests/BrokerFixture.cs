@@ -59,7 +59,7 @@ internal sealed class Observer : IDisposable
         Client.ApplicationMessageReceivedAsync += args =>
         {
             var message = args.ApplicationMessage;
-            _messages.Writer.TryWrite(new(message.Topic, message.ConvertPayloadToString(), message.Retain));
+            _messages.Writer.TryWrite(new(message.Topic, message.ConvertPayloadToString() ?? "", message.Retain));
             return Task.CompletedTask;
         };
     }
@@ -103,14 +103,17 @@ internal sealed class RunningAgent : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _task;
     public Channel<string> Notifications { get; } = Channel.CreateUnbounded<string>();
+    public System.Collections.Concurrent.ConcurrentQueue<ConnectionStatus> Statuses { get; } = new();
 
-    public RunningAgent(AppSettings settings, string password = "", Func<string, CancellationToken, Task>? action = null, IDesktopControls? desktop = null)
+    public RunningAgent(AppSettings settings, string password = "", Func<string, CancellationToken, Task>? action = null,
+        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null)
     {
         var agent = new MqttAgent(settings, password, action ?? ((message, _) =>
         {
             Notifications.Writer.TryWrite(message);
             return Task.CompletedTask;
-        }), desktop);
+        }), desktop, pcActions, discoveryStore);
+        agent.StatusChanged += status => Statuses.Enqueue(status);
         _task = agent.RunAsync(_stop.Token);
     }
 

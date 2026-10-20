@@ -38,7 +38,7 @@ public sealed class SettingsTests
             Assert.Null(store.Load());
             var settings = new AppSettings { BrokerHost = "mqtt.local", Username = "pc-user", UseTls = true, BrokerPort = 8883 };
             store.Save(settings);
-            Assert.Equal(settings, store.Load());
+            Assert.Equivalent(settings, store.Load(), strict: true);
             var text = File.ReadAllText(path);
             Assert.DoesNotContain("password", text, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("topic", text, StringComparison.OrdinalIgnoreCase);
@@ -81,4 +81,63 @@ public sealed class SettingsTests
     [Fact]
     public void RejectsOversizedPayloads() =>
         Assert.Throws<ArgumentException>(() => TestCommand.Parse(new byte[TestCommand.MaximumPayloadBytes + 1]));
+
+    [Fact]
+    public void LoadsStageTwoSettingsWithPowerDisabledAndNoActions()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"mqtt2pc-legacy-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, "{\"brokerHost\":\"mqtt.local\",\"brokerPort\":1883,\"useTls\":false,\"username\":\"pc\",\"computerName\":\"Desktop\",\"deviceId\":\"old-pc\"}");
+            var settings = new SettingsStore(path).Load()!;
+            Assert.Equal("old-pc", settings.DeviceId);
+            Assert.Empty(settings.Actions);
+            Assert.All(Enum.GetValues<PowerAction>(), power => Assert.False(settings.Power.IsEnabled(power)));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void PowerAndConfiguredActionsRoundTripIncludingLiteralArguments()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"mqtt2pc-actions-{Guid.NewGuid():N}.json");
+        try
+        {
+            var settings = new AppSettings
+            {
+                BrokerHost = "mqtt.local", Power = new PowerControls { Lock = true, Restart = true },
+                Actions = [StageThreeTests.ExampleAction() with { Arguments = ["a b", "quoted \"value\"", ""] }]
+            };
+            var store = new SettingsStore(path);
+            store.Save(settings);
+            Assert.Equivalent(settings, store.Load(), strict: true);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Theory]
+    [InlineData("relative.exe")]
+    [InlineData("C:\\scripts\\script.ps1")]
+    [InlineData("relative.bat")]
+    [InlineData("https://example.com/program.exe")]
+    public void ActionExecutablesMustBeAbsoluteProgramPaths(string executable) =>
+        Assert.Throws<ArgumentException>(() => (StageThreeTests.ExampleAction() with { Executable = executable }).Validate());
+
+    [Theory]
+    [InlineData("C:\\scripts\\automation.bat")]
+    [InlineData("C:\\Folder with spaces\\automation.BAT")]
+    public void AcceptsAbsoluteBatchFiles(string path) =>
+        (StageThreeTests.ExampleAction() with { Executable = path }).Validate();
+
+    [Fact]
+    public void RejectsDuplicateActionIdsAndInvalidArguments()
+    {
+        Assert.Throws<ArgumentException>(() => new AppSettings
+        {
+            BrokerHost = "localhost", Actions = [StageThreeTests.ExampleAction(), StageThreeTests.ExampleAction()]
+        }.Validate());
+        Assert.Throws<ArgumentException>(() => (StageThreeTests.ExampleAction() with { Arguments = ["hello\nworld"] }).Validate());
+        Assert.Throws<ArgumentException>(() => (StageThreeTests.ExampleAction() with { Arguments = new string[65] }).Validate());
+        Assert.Throws<ArgumentException>(() => (StageThreeTests.ExampleAction() with { WorkingDirectory = "relative" }).Validate());
+    }
 }

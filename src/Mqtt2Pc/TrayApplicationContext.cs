@@ -95,7 +95,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await StopAgentAsync();
             _agentCancellation = new CancellationTokenSource();
             var token = _agentCancellation.Token;
-            var agent = new MqttAgent(settings, password, ShowNotificationAsync, new WindowsDesktopControls(_dispatcher));
+            var discoveryPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "mqtt2PC", $"discovery-{settings.DeviceId}.json");
+            var agent = new MqttAgent(settings, password, ShowNotificationAsync,
+                new WindowsDesktopControls(_dispatcher), new WindowsPcActions(), new DiscoveryStore(discoveryPath));
             agent.StatusChanged += status => Post(() => UpdateStatus(status));
             agent.AudioStateChanged += state => Post(() =>
             {

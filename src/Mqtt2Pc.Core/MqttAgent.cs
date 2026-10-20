@@ -17,6 +17,9 @@ public sealed class MqttAgent
     private readonly string _password;
     private readonly Func<string, CancellationToken, Task> _showNotification;
     private readonly IDesktopControls? _desktop;
+    private readonly IPcActions? _pcActions;
+    private readonly DiscoveryStore? _discoveryStore;
+    private readonly HashSet<string> _advertisedTopics = [];
     private readonly HashSet<string> _recentIds = [];
     private readonly Queue<string> _idOrder = new();
     private int _started;
@@ -25,13 +28,15 @@ public sealed class MqttAgent
     public event Action<AudioState?>? AudioStateChanged;
 
     public MqttAgent(AppSettings settings, string password, Func<string, CancellationToken, Task> showNotification,
-        IDesktopControls? desktop = null)
+        IDesktopControls? desktop = null, IPcActions? pcActions = null, DiscoveryStore? discoveryStore = null)
     {
         settings.Validate();
-        _settings = settings;
+        _settings = settings with { Actions = settings.Actions.Select(action => action with { Arguments = action.Arguments.ToArray() }).ToArray() };
         _password = password;
         _showNotification = showNotification;
         _desktop = desktop;
+        _pcActions = pcActions;
+        _discoveryStore = discoveryStore;
     }
 
     // One owner controls the entire connection lifetime, including reconnect and shutdown.
@@ -67,7 +72,8 @@ public sealed class MqttAgent
                 client.ApplicationMessageReceivedAsync += args =>
                 {
                     var message = args.ApplicationMessage;
-                    if ((commandTopics.Contains(message.Topic) || (_desktop is not null && message.Topic == HomeAssistantDiscovery.BirthTopic)) &&
+                    if ((commandTopics.Contains(message.Topic) || (_pcActions is not null && IsPcCommand(message.Topic)) ||
+                        (_desktop is not null && message.Topic == HomeAssistantDiscovery.BirthTopic)) &&
                         message.Payload.Length <= TestCommand.MaximumPayloadBytes &&
                         !incoming.Writer.TryWrite(new ReceivedCommand(message.Topic, message.Retain, message.Dup, message.Payload.ToArray())))
                         Report(true, "Command queue full; a command was ignored.");
@@ -84,6 +90,11 @@ public sealed class MqttAgent
                             .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
                             .WithRetainAsPublished(true)
                             .WithRetainHandling(MqttRetainHandling.DoNotSendOnSubscribe));
+                    if (_pcActions is not null)
+                        foreach (var topic in new[] { _settings.PowerCommandTopic("+"), _settings.ActionCommandTopic("+") })
+                            subscribe.WithTopicFilter(filter => filter.WithTopic(topic)
+                                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                                .WithRetainAsPublished(true).WithRetainHandling(MqttRetainHandling.DoNotSendOnSubscribe));
                     if (_desktop is not null)
                         subscribe.WithTopicFilter(filter => filter.WithTopic(HomeAssistantDiscovery.BirthTopic)
                             .WithRetainHandling(MqttRetainHandling.DoNotSendOnSubscribe));
@@ -204,7 +215,9 @@ public sealed class MqttAgent
             }
             if (message.Topic != _settings.TestCommandTopic)
             {
-                await ProcessDesktopCommandAsync(client, message, audio, token).ConfigureAwait(false);
+                if (IsPcCommand(message.Topic))
+                    await ProcessPcCommandAsync(client, message, token).ConfigureAwait(false);
+                else await ProcessDesktopCommandAsync(client, message, audio, token).ConfigureAwait(false);
                 continue;
             }
             TestCommand command;
@@ -215,13 +228,11 @@ public sealed class MqttAgent
                     .ConfigureAwait(false);
                 continue;
             }
-            if (!_recentIds.Add(command.Id))
+            if (!RememberId(message.Topic, command.Id))
             {
                 await PublishResultAsync(client, command.Id, "duplicate", "This command id was already handled.", token).ConfigureAwait(false);
                 continue;
             }
-            _idOrder.Enqueue(command.Id);
-            if (_idOrder.Count > 1024) _recentIds.Remove(_idOrder.Dequeue());
 
             string status;
             string detail;
@@ -240,6 +251,71 @@ public sealed class MqttAgent
             }
             await PublishResultAsync(client, command.Id, status, detail, token).ConfigureAwait(false);
         }
+    }
+
+    private bool IsPcCommand(string topic) =>
+        topic.StartsWith(_settings.PowerCommandTopic(""), StringComparison.Ordinal) ||
+        topic.StartsWith(_settings.ActionCommandTopic(""), StringComparison.Ordinal);
+
+    private bool RememberId(string topic, string id)
+    {
+        var key = $"{topic}:{id}";
+        if (!_recentIds.Add(key)) return false;
+        _idOrder.Enqueue(key);
+        if (_idOrder.Count > 1024) _recentIds.Remove(_idOrder.Dequeue());
+        return true;
+    }
+
+    private async Task ProcessPcCommandAsync(IMqttClient client, ReceivedCommand message, CancellationToken token)
+    {
+        ActionCommand command;
+        try { command = ActionCommand.Parse(message.Payload); }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            await PublishResultAsync(client, null, "rejected", "Supply JSON containing only a unique id. Action parameters are configured locally.", token, message.Topic)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        PowerAction? power = null;
+        ConfiguredAction? configured = null;
+        foreach (var candidate in Enum.GetValues<PowerAction>())
+            if (message.Topic == _settings.PowerCommandTopic(candidate.ToString().ToLowerInvariant()) && _settings.Power.IsEnabled(candidate))
+                power = candidate;
+        if (power is null)
+            configured = _settings.Actions.FirstOrDefault(action => action.Enabled && message.Topic == _settings.ActionCommandTopic(action.Id));
+        if (power is null && configured is null)
+        {
+            await PublishResultAsync(client, command.Id, "rejected", "This power control or configured action is disabled or unknown.", token, message.Topic)
+                .ConfigureAwait(false);
+            return;
+        }
+        if (!RememberId(message.Topic, command.Id))
+        {
+            await PublishResultAsync(client, command.Id, "duplicate", "This command id was already handled.", token, message.Topic).ConfigureAwait(false);
+            return;
+        }
+
+        // A power transition can close the network or suspend this process before
+        // the Windows call returns. Acknowledge receipt before requesting it.
+        if (power.HasValue)
+            await PublishResultAsync(client, command.Id, "accepted", "Power request accepted; waiting for Windows.", token, message.Topic).ConfigureAwait(false);
+        int? processId = null;
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            if (power.HasValue) await _pcActions!.ExecutePowerAsync(power.Value, token).ConfigureAwait(false);
+            else processId = await _pcActions!.LaunchAsync(configured!, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception)
+        {
+            await PublishResultAsync(client, command.Id, "error", "Windows could not perform this action. Check the executable, working directory and Windows permissions.", token, message.Topic)
+                .ConfigureAwait(false);
+            return;
+        }
+        await PublishResultAsync(client, command.Id, "success", power.HasValue ? "Windows accepted the power request." : "Configured program launched.",
+            token, message.Topic, processId).ConfigureAwait(false);
     }
 
     private async Task ProcessDesktopCommandAsync(IMqttClient client, ReceivedCommand command, AudioPublication audio, CancellationToken token)
@@ -290,8 +366,18 @@ public sealed class MqttAgent
 
     private async Task PublishDiscoveryAsync(IMqttClient client, CancellationToken token)
     {
-        foreach (var discovery in HomeAssistantDiscovery.Create(_settings))
+        var configurations = HomeAssistantDiscovery.Create(_settings);
+        var current = configurations.Select(item => item.Topic).ToHashSet(StringComparer.Ordinal);
+        if (_discoveryStore is not null)
+            _advertisedTopics.UnionWith(_discoveryStore.Load().Where(topic => HomeAssistantDiscovery.IsDeviceTopic(_settings, topic)));
+        _discoveryStore?.Save(_advertisedTopics.Union(current));
+        foreach (var obsolete in _advertisedTopics.Except(current).ToArray())
+            await PublishAsync(client, obsolete, "", true, token).ConfigureAwait(false);
+        foreach (var discovery in configurations)
             await PublishAsync(client, discovery.Topic, discovery.Payload, true, token).ConfigureAwait(false);
+        _advertisedTopics.Clear();
+        _advertisedTopics.UnionWith(current);
+        _discoveryStore?.Save(current);
     }
 
     private async Task PublishAudioAsync(IMqttClient client, AudioPublication published, bool force, CancellationToken token)
@@ -329,9 +415,11 @@ public sealed class MqttAgent
             incoming.TryWrite(new ReceivedCommand("", false, false, []));
     }
 
-    private Task PublishResultAsync(IMqttClient client, string? id, string status, string message, CancellationToken token, string? commandTopic = null) =>
+    private Task PublishResultAsync(IMqttClient client, string? id, string status, string message, CancellationToken token,
+        string? commandTopic = null, int? processId = null) =>
         PublishAsync(client, _settings.ResultTopic,
-            JsonSerializer.Serialize(new { id, status, message, timestamp = DateTimeOffset.UtcNow, command_topic = commandTopic ?? _settings.TestCommandTopic }), false, token);
+            JsonSerializer.Serialize(new { id, status, message, timestamp = DateTimeOffset.UtcNow,
+                command_topic = commandTopic ?? _settings.TestCommandTopic, process_id = processId }), false, token);
 
     private static async Task PublishAsync(IMqttClient client, string topic, string payload, bool retain, CancellationToken token)
     {

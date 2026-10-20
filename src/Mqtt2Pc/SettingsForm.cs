@@ -16,6 +16,12 @@ internal sealed class SettingsForm : Form
     private readonly Label _audio = new() { AutoSize = true, MaximumSize = new Size(490, 0) };
     private readonly Label _error = new() { AutoSize = true, ForeColor = Color.Firebrick, MaximumSize = new Size(490, 0) };
     private readonly Button _save = new() { Text = "Save and connect", AutoSize = true };
+    private readonly Dictionary<PowerAction, CheckBox> _power = [];
+    private readonly ListView _actions = new()
+    {
+        Dock = DockStyle.Fill, View = View.Details, CheckBoxes = true,
+        FullRowSelect = true, MultiSelect = false, HideSelection = false
+    };
     private bool _saving;
 
     public SettingsForm(AppSettings settings, string password, Func<AppSettings, string, Task> saveAndConnect)
@@ -25,8 +31,8 @@ internal sealed class SettingsForm : Form
         Text = "mqtt2PC — Settings";
         Icon = SystemIcons.Application;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(570, 680);
-        MinimumSize = new Size(560, 540);
+        ClientSize = new Size(740, 680);
+        MinimumSize = new Size(640, 540);
         StartPosition = FormStartPosition.CenterScreen;
 
         var layout = new TableLayoutPanel
@@ -38,7 +44,12 @@ internal sealed class SettingsForm : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         scroll.Controls.Add(layout);
-        Controls.Add(scroll);
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var connection = new TabPage("Connection");
+        connection.Controls.Add(scroll);
+        tabs.TabPages.Add(connection);
+        tabs.TabPages.Add(CreateActionsPage(settings));
+        Controls.Add(tabs);
 
         AddWide(layout, new Label { Text = "Connect this PC to your MQTT broker", AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
         AddRow(layout, "Broker host", _host);
@@ -57,7 +68,6 @@ internal sealed class SettingsForm : Form
             Text = "Home Assistant automatically discovers volume, mute and media buttons through MQTT (default discovery prefix: homeassistant).",
             AutoSize = true, MaximumSize = new Size(490, 0)
         });
-        AddWide(layout, _audio);
 
         var copy = new Button { Text = "Copy a fresh test payload", AutoSize = true };
         copy.Click += (_, _) =>
@@ -76,18 +86,25 @@ internal sealed class SettingsForm : Form
             }
         };
         AddWide(layout, copy);
-        AddWide(layout, _status);
-        AddWide(layout, _error);
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, Padding = new Padding(20, 8, 20, 8)
+        };
+        AddWide(footer, _status);
+        AddWide(footer, _audio);
+        AddWide(footer, _error);
         var buttons = new FlowLayoutPanel
         {
             AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Bottom,
-            FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(20, 10, 20, 14), WrapContents = false
+            FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 0, 4), WrapContents = false
         };
         var close = new Button { Text = "Close", AutoSize = true };
         close.Click += (_, _) => Close();
         buttons.Controls.Add(close);
         buttons.Controls.Add(_save);
-        Controls.Add(buttons);
+        AddWide(footer, buttons);
+        buttons.Dock = DockStyle.Fill;
+        Controls.Add(footer);
         AcceptButton = _save;
         CancelButton = close;
 
@@ -122,7 +139,13 @@ internal sealed class SettingsForm : Form
             var settings = _original with
             {
                 BrokerHost = _host.Text.Trim(), BrokerPort = (int)_port.Value, UseTls = _tls.Checked,
-                Username = _username.Text, ComputerName = _name.Text.Trim()
+                Username = _username.Text, ComputerName = _name.Text.Trim(),
+                Power = new PowerControls
+                {
+                    Lock = _power[PowerAction.Lock].Checked, Sleep = _power[PowerAction.Sleep].Checked,
+                    Shutdown = _power[PowerAction.Shutdown].Checked, Restart = _power[PowerAction.Restart].Checked
+                },
+                Actions = _actions.Items.Cast<ListViewItem>().Select(item => ((ConfiguredAction)item.Tag!) with { Enabled = item.Checked }).ToArray()
             };
             settings.Validate();
             await _saveAndConnect(settings, _password.Text);
@@ -137,6 +160,74 @@ internal sealed class SettingsForm : Form
             _saving = false;
             _save.Enabled = true;
         }
+    }
+
+    private TabPage CreateActionsPage(AppSettings settings)
+    {
+        var page = new TabPage("Power and actions") { Padding = new Padding(16) };
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.Controls.Add(body);
+        var power = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
+        power.Controls.Add(new Label { Text = "Enable power controls:", AutoSize = true, Margin = new Padding(0, 5, 15, 5) });
+        foreach (var action in Enum.GetValues<PowerAction>())
+        {
+            var toggle = new CheckBox { Text = action.ToString(), AutoSize = true, Checked = settings.Power.IsEnabled(action) };
+            _power.Add(action, toggle);
+            power.Controls.Add(toggle);
+        }
+        body.Controls.Add(power, 0, 0);
+        body.Controls.Add(new Label
+        {
+            Text = "Configured actions — checked actions appear as Home Assistant buttons. Changes apply when you select Save and connect.",
+            AutoSize = true, MaximumSize = new Size(660, 0), Margin = new Padding(0, 15, 0, 12)
+        }, 0, 1);
+        _actions.Columns.Add("Name", 190);
+        _actions.Columns.Add("Action ID", 160);
+        _actions.Columns.Add("Executable", 320);
+        foreach (var action in settings.Actions) AddActionItem(action);
+        body.Controls.Add(_actions, 0, 2);
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
+        var add = new Button { Text = "Add…", AutoSize = true };
+        var edit = new Button { Text = "Edit…", AutoSize = true };
+        var remove = new Button { Text = "Remove", AutoSize = true };
+        add.Click += (_, _) =>
+        {
+            if (_actions.Items.Count >= 32) { _error.Text = "You can configure at most 32 actions."; return; }
+            using var dialog = new ActionEditorForm(null, id => !_actions.Items.Cast<ListViewItem>().Any(item => ((ConfiguredAction)item.Tag!).Id == id));
+            if (dialog.ShowDialog(this) == DialogResult.OK) AddActionItem(dialog.Action);
+        };
+        void EditSelected()
+        {
+            if (_actions.SelectedItems.Count == 0) return;
+            var item = _actions.SelectedItems[0];
+            var action = ((ConfiguredAction)item.Tag!) with { Enabled = item.Checked };
+            using var dialog = new ActionEditorForm(action, id => !_actions.Items.Cast<ListViewItem>().Any(other => other != item && ((ConfiguredAction)other.Tag!).Id == id));
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            item.Text = dialog.Action.Name;
+            item.SubItems[1].Text = dialog.Action.Id;
+            item.SubItems[2].Text = dialog.Action.Executable;
+            item.Checked = dialog.Action.Enabled;
+            item.Tag = dialog.Action;
+        }
+        edit.Click += (_, _) => EditSelected();
+        _actions.DoubleClick += (_, _) => EditSelected();
+        remove.Click += (_, _) =>
+        {
+            if (_actions.SelectedItems.Count != 0) _actions.Items.Remove(_actions.SelectedItems[0]);
+        };
+        buttons.Controls.AddRange([add, edit, remove]);
+        body.Controls.Add(buttons, 0, 3);
+        return page;
+    }
+
+    private void AddActionItem(ConfiguredAction action)
+    {
+        var item = new ListViewItem(new[] { action.Name, action.Id, action.Executable }) { Checked = action.Enabled, Tag = action };
+        _actions.Items.Add(item);
     }
 
     private static void AddRow(TableLayoutPanel layout, string title, Control control)
