@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.0.1" PrivateAssets="all" />
+    <PackageReference Include="MQTTnet.Server" Version="5.2.0.1603" />
+    <ProjectReference Include="..\..\src\Mqtt2Pc.Core\Mqtt2Pc.Core.csproj" />
+    <ProjectReference Include="..\..\src\Mqtt2Pc\Mqtt2Pc.csproj" />
+  </ItemGroup>
+</Project>

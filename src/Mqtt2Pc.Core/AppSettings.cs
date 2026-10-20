@@ -1,0 +1,44 @@
+using System.Net;
+using System.Text.RegularExpressions;
+
+namespace Mqtt2Pc.Core;
+
+public sealed record AppSettings
+{
+    public string BrokerHost { get; init; } = "";
+    public int BrokerPort { get; init; } = 1883;
+    public bool UseTls { get; init; }
+    public string Username { get; init; } = "";
+    public string ComputerName { get; init; } = Environment.MachineName;
+    public string DeviceId { get; init; } = CreateDeviceId();
+
+    public string TopicPrefix => $"mqtt2pc/{DeviceId}";
+    public string AvailabilityTopic => $"{TopicPrefix}/availability";
+    public string TestCommandTopic => $"{TopicPrefix}/command/test";
+    public string ResultTopic => $"{TopicPrefix}/result";
+    public string ClientId => $"mqtt2pc-{DeviceId}";
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(BrokerHost) || BrokerHost.Length > 253 ||
+            BrokerHost != BrokerHost.Trim() ||
+            (Uri.CheckHostName(BrokerHost) == UriHostNameType.Unknown && !IPAddress.TryParse(BrokerHost, out _)))
+            throw new ArgumentException("Enter a broker hostname or IP address, without a scheme or port.");
+        if (BrokerPort is < 1 or > 65535)
+            throw new ArgumentException("The broker port must be between 1 and 65535.");
+        if (Username is null || Username.Length > 256 || Username.Any(char.IsControl))
+            throw new ArgumentException("The username must be at most 256 characters, without control characters.");
+        if (string.IsNullOrWhiteSpace(ComputerName) || ComputerName.Length > 80 || ComputerName.Any(char.IsControl))
+            throw new ArgumentException("The PC name must be between 1 and 80 characters.");
+        if (DeviceId is null || !Regex.IsMatch(DeviceId, "\\A[a-z0-9][a-z0-9_-]{0,47}\\z"))
+            throw new ArgumentException("The device ID must contain 1–48 lowercase letters, digits, hyphens or underscores.");
+    }
+
+    private static string CreateDeviceId()
+    {
+        var name = Regex.Replace(Environment.MachineName.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-');
+        if (name.Length == 0) name = "pc";
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        return $"{name[..Math.Min(name.Length, 30)]}-{suffix}";
+    }
+}
