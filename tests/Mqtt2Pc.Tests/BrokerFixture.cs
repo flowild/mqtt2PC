@@ -28,13 +28,14 @@ internal sealed class BrokerFixture : IAsyncDisposable
         Settings = new AppSettings { BrokerHost = "127.0.0.1", BrokerPort = Port, DeviceId = "integration-pc" };
     }
 
-    public async Task<Observer> ConnectObserverAsync()
+    public async Task<Observer> ConnectObserverAsync(params string[] extraTopics)
     {
         var observer = new Observer();
         await observer.Client.ConnectAsync(new MqttClientOptionsBuilder().WithTcpServer("127.0.0.1", Port)
             .WithProtocolVersion(MqttProtocolVersion.V500).WithClientId($"observer-{Guid.NewGuid():N}").Build());
-        await observer.Client.SubscribeAsync(new MqttClientSubscribeOptionsBuilder()
-            .WithTopicFilter($"{Settings.TopicPrefix}/#").Build());
+        var subscriptions = new MqttClientSubscribeOptionsBuilder().WithTopicFilter($"{Settings.TopicPrefix}/#");
+        foreach (var topic in extraTopics) subscriptions.WithTopicFilter(topic);
+        await observer.Client.SubscribeAsync(subscriptions.Build());
         return observer;
     }
 
@@ -51,6 +52,7 @@ internal sealed class Observer : IDisposable
 {
     public IMqttClient Client { get; } = new MqttClientFactory().CreateMqttClient();
     private readonly Channel<Observed> _messages = Channel.CreateUnbounded<Observed>();
+    private readonly List<Observed> _pending = [];
 
     public Observer()
     {
@@ -64,18 +66,28 @@ internal sealed class Observer : IDisposable
 
     public async Task<Observed> WaitAsync(string topic, Func<Observed, bool>? predicate = null)
     {
+        var existing = _pending.FindIndex(message => message.Topic == topic && (predicate is null || predicate(message)));
+        if (existing >= 0)
+        {
+            var found = _pending[existing];
+            _pending.RemoveAt(existing);
+            return found;
+        }
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
         while (await _messages.Reader.WaitToReadAsync(timeout.Token))
         {
             while (_messages.Reader.TryRead(out var message))
+            {
                 if (message.Topic == topic && (predicate is null || predicate(message))) return message;
+                _pending.Add(message);
+            }
         }
         throw new InvalidOperationException("The broker did not deliver the expected message.");
     }
 
-    public Task PublishAsync(string topic, string payload, bool retain = false) => Client.PublishAsync(
+    public Task PublishAsync(string topic, string payload, bool retain = false, MqttQualityOfServiceLevel qos = MqttQualityOfServiceLevel.AtLeastOnce) => Client.PublishAsync(
         new MqttApplicationMessageBuilder().WithTopic(topic).WithPayload(payload).WithRetainFlag(retain)
-            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build());
+            .WithQualityOfServiceLevel(qos).Build());
 
     public static bool HasStatus(Observed message, string status)
     {
@@ -92,13 +104,13 @@ internal sealed class RunningAgent : IAsyncDisposable
     private readonly Task _task;
     public Channel<string> Notifications { get; } = Channel.CreateUnbounded<string>();
 
-    public RunningAgent(AppSettings settings, string password = "", Func<string, CancellationToken, Task>? action = null)
+    public RunningAgent(AppSettings settings, string password = "", Func<string, CancellationToken, Task>? action = null, IDesktopControls? desktop = null)
     {
         var agent = new MqttAgent(settings, password, action ?? ((message, _) =>
         {
             Notifications.Writer.TryWrite(message);
             return Task.CompletedTask;
-        }));
+        }), desktop);
         _task = agent.RunAsync(_stop.Token);
     }
 

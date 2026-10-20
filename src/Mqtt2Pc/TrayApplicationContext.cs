@@ -14,6 +14,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly SemaphoreSlim _transition = new(1, 1);
     private AppSettings _settings = new();
     private ConnectionStatus _status = new(false, "Enter your MQTT broker details to connect.");
+    private AudioState? _audioState;
     private SettingsForm? _form;
     private CancellationTokenSource? _agentCancellation;
     private Task? _agentTask;
@@ -80,6 +81,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await RestartAsync(settings, secret);
         });
         _form.SetStatus(_status);
+        _form.SetAudioState(_audioState);
         _form.FormClosed += (_, _) => _form = null;
         _form.Show();
     }
@@ -93,8 +95,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
             await StopAgentAsync();
             _agentCancellation = new CancellationTokenSource();
             var token = _agentCancellation.Token;
-            var agent = new MqttAgent(settings, password, ShowNotificationAsync);
+            var agent = new MqttAgent(settings, password, ShowNotificationAsync, new WindowsDesktopControls(_dispatcher));
             agent.StatusChanged += status => Post(() => UpdateStatus(status));
+            agent.AudioStateChanged += state => Post(() =>
+            {
+                _audioState = state;
+                _form?.SetAudioState(state);
+            });
             _agentTask = Task.Run(() => agent.RunAsync(token));
         }
         finally { _transition.Release(); }
@@ -139,6 +146,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _statusItem.Text = status.IsConnected ? "Connected" : "Disconnected";
         _tray.Text = status.IsConnected ? "mqtt2PC — Connected" : "mqtt2PC — Disconnected";
         _form?.SetStatus(status);
+        if (!status.IsConnected) { _audioState = null; _form?.SetAudioState(null); }
     }
 
     private async Task ShutdownAsync()

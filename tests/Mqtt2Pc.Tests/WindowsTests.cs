@@ -1,10 +1,56 @@
 using Mqtt2Pc.Core;
+using System.Runtime.InteropServices;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Mqtt2Pc.Tests;
 
-public sealed class WindowsTests
+public sealed class WindowsTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData(MediaAction.PlayPause, 0xB3)]
+    [InlineData(MediaAction.Next, 0xB0)]
+    [InlineData(MediaAction.Previous, 0xB1)]
+    public void MediaInputHasNativeLayoutAndPairedKeyEvents(MediaAction action, int key)
+    {
+        Assert.Equal(IntPtr.Size == 8 ? 40 : 28, Marshal.SizeOf<WindowsMedia.Input>());
+        var inputs = WindowsMedia.CreateInputs(action);
+        Assert.Equal(2, inputs.Length);
+        Assert.All(inputs, input =>
+        {
+            Assert.Equal(1u, input.Type);
+            Assert.Equal((ushort)key, input.Data.Keyboard.VirtualKey);
+        });
+        Assert.Equal(1u, inputs[0].Data.Keyboard.Flags);
+        Assert.Equal(3u, inputs[1].Data.Keyboard.Flags);
+    }
+
+    [Fact]
+    public async Task ReadsNativeAudioStateWithoutChangingVolumeOrPlayback()
+    {
+        var completion = new TaskCompletionSource<AudioState?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try { completion.SetResult(WindowsAudio.GetState()); }
+            catch (COMException exception) when (exception.HResult == unchecked((int)0x80070490))
+            {
+                // A headless Windows test machine may have no default output endpoint.
+                completion.SetResult(null);
+            }
+            catch (Exception exception) { completion.SetException(exception); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+        var state = await completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        if (state is null) output.WriteLine("Windows has no default playback endpoint; device-unavailable handling is covered by broker tests.");
+        else
+        {
+            Assert.InRange(state.Volume, 0, 100);
+            output.WriteLine($"Read native Windows audio: volume {state.Volume}%, muted {state.Muted}.");
+        }
+    }
+
     [Fact]
     public void CredentialManagerRoundTripsAndRemovesOnlyTheTestCredential()
     {
@@ -38,6 +84,7 @@ public sealed class WindowsTests
                     ComputerName = "Desktop PC"
                 }, "", (_, _) => throw new InvalidOperationException("A render must not save settings."));
                 form.SetStatus(new ConnectionStatus(false, "Disconnected — enter your broker details and click Save and connect."));
+                form.SetAudioState(new AudioState(35, false));
                 // A form must be visible to WinForms for its child controls to render.
                 // Zero opacity and no taskbar entry keep this test off the user's desktop.
                 form.Opacity = 0;

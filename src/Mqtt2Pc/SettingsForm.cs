@@ -13,6 +13,7 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _password = new() { UseSystemPasswordChar = true, MaxLength = 1024 };
     private readonly TextBox _name = new() { MaxLength = 80 };
     private readonly Label _status = new() { AutoSize = true, MaximumSize = new Size(490, 0) };
+    private readonly Label _audio = new() { AutoSize = true, MaximumSize = new Size(490, 0) };
     private readonly Label _error = new() { AutoSize = true, ForeColor = Color.Firebrick, MaximumSize = new Size(490, 0) };
     private readonly Button _save = new() { Text = "Save and connect", AutoSize = true };
     private bool _saving;
@@ -51,6 +52,12 @@ internal sealed class SettingsForm : Form
         AddRow(layout, "Availability", new TextBox { Text = settings.AvailabilityTopic, ReadOnly = true });
         AddRow(layout, "Test command", new TextBox { Text = settings.TestCommandTopic, ReadOnly = true });
         AddRow(layout, "Results", new TextBox { Text = settings.ResultTopic, ReadOnly = true });
+        AddWide(layout, new Label
+        {
+            Text = "Home Assistant automatically discovers volume, mute and media buttons through MQTT (default discovery prefix: homeassistant).",
+            AutoSize = true, MaximumSize = new Size(490, 0)
+        });
+        AddWide(layout, _audio);
 
         var copy = new Button { Text = "Copy a fresh test payload", AutoSize = true };
         copy.Click += (_, _) =>
@@ -100,6 +107,10 @@ internal sealed class SettingsForm : Form
     }
 
     public void SetStatus(ConnectionStatus status) => _status.Text = status.Message;
+
+    public void SetAudioState(AudioState? state) => _audio.Text = state is null
+        ? "Audio: unavailable or not connected"
+        : $"Audio: {state.Volume}% — {(state.Muted ? "muted" : "unmuted")}";
 
     private async Task SaveAsync()
     {

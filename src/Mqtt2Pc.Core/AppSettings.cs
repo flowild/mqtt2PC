@@ -15,6 +15,11 @@ public sealed record AppSettings
     public string TopicPrefix => $"mqtt2pc/{DeviceId}";
     public string AvailabilityTopic => $"{TopicPrefix}/availability";
     public string TestCommandTopic => $"{TopicPrefix}/command/test";
+    public string VolumeCommandTopic => $"{TopicPrefix}/command/volume";
+    public string MuteCommandTopic => $"{TopicPrefix}/command/mute";
+    public string AudioStateTopic => $"{TopicPrefix}/state/audio";
+    public string AudioAvailabilityTopic => $"{TopicPrefix}/availability/audio";
+    public string MediaCommandTopic(string action) => $"{TopicPrefix}/command/media/{action}";
     public string ResultTopic => $"{TopicPrefix}/result";
     public string ClientId => $"mqtt2pc-{DeviceId}";
 
